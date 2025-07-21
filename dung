@@ -1,0 +1,715 @@
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Listen and Write English</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom font import */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Style for disabled buttons */
+        button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+        /* Loading spinner */
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3b82f6;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 p-4">
+
+    <header class="bg-white shadow-lg rounded-xl p-6 mb-8 flex flex-col md:flex-row justify-between items-center">
+        <h1 class="text-4xl font-extrabold text-gray-800 mb-4 md:mb-0">
+            Listen and write English
+        </h1>
+        <nav class="space-x-2 sm:space-x-4 flex flex-wrap justify-center">
+            <button id="home-nav-btn" class="px-4 py-2 sm:px-6 sm:py-3 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition">Trang Chủ</button>
+            <button id="teacher-nav-btn" class="px-4 py-2 sm:px-6 sm:py-3 bg-green-600 text-white rounded-lg shadow-md hover:bg-green-700 transition">Giáo Viên</button>
+            <button id="student-nav-btn" class="px-4 py-2 sm:px-6 sm:py-3 bg-purple-600 text-white rounded-lg shadow-md hover:bg-purple-700 transition">Học Sinh</button>
+        </nav>
+    </header>
+
+    <main id="app-main-content" class="container mx-auto">
+        <div class="text-center text-gray-600 text-xl mt-10">Đang tải dữ liệu...</div>
+    </main>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="delete-confirm-modal" class="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
+            <h3 class="text-xl font-bold text-gray-800 mb-4">Xác nhận xóa</h3>
+            <p class="text-gray-700 mb-6">Bạn có chắc chắn muốn xóa <span id="exercise-to-delete-id" class="font-semibold"></span> không?</p>
+            <div class="flex justify-end space-x-4">
+                <button id="cancel-delete-btn" class="px-4 py-2 bg-gray-300 text-gray-800 rounded-md hover:bg-gray-400">Hủy</button>
+                <button id="confirm-delete-btn" class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700">Xóa</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        // Changed Firebase SDK URLs to use HTTP as requested.
+        // Note: Using HTTPS is generally recommended for security.
+        import { initializeApp } from "http://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "http://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, deleteDoc, onSnapshot, collection } from "http://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Global State & Config ---
+        let currentView = 'home'; // Tracks the current view of the application
+        let exercises = []; // Stores all loaded exercises
+        let selectedExercise = null; // Stores the currently selected exercise for students
+        let exerciseToDelete = null; // Stores the exercise marked for deletion
+        let currentSentenceIndex = 0; // Tracks the current sentence being played/typed by the student
+        let studentAnswers = {}; // Stores student's answers for each exercise and sentence
+        let audioContext; // Web Audio API context
+        let currentAudioSource = null; // Current audio source node for stopping playback
+
+        let app, auth, db; // Firebase app, auth, and firestore instances
+        let userId = 'anonymous'; // User ID, defaults to anonymous
+        let authReady = false; // Flag to indicate if Firebase authentication is ready
+
+        // Firebase configuration, provided by the environment or defaults
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_AUTH_DOMAIN",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+        // Application ID, provided by the environment or defaults
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-listen-write-app';
+
+        // --- App Initialization ---
+        window.onload = async () => {
+            try {
+                // Initialize Firebase app
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                // Polyfill for AudioContext for cross-browser compatibility
+                window.AudioContext = window.AudioContext || window.webkitAudioContext;
+
+                // Authenticate user: use custom token if available, otherwise sign in anonymously
+                await (typeof __initial_auth_token !== 'undefined' ? signInWithCustomToken(auth, __initial_auth_token) : signInAnonymously(auth));
+
+                // Listen for authentication state changes
+                onAuthStateChanged(auth, (user) => {
+                    // Set userId based on authenticated user or a random UUID for anonymous
+                    userId = user ? user.uid : crypto.randomUUID();
+                    console.log("User ID:", userId);
+                    authReady = true; // Mark authentication as ready
+                    setupFirestoreListeners(); // Set up Firestore listeners after auth is ready
+                    renderView(); // Render the initial view
+                });
+            } catch (error) {
+                console.error("Firebase Init Error:", error);
+                // Display error message if Firebase initialization fails
+                document.getElementById('app-main-content').innerHTML = '<div class="text-center text-red-600 text-xl mt-10">Lỗi khi tải ứng dụng.</div>';
+            }
+        };
+
+        // --- Firestore Operations ---
+        /**
+         * Sets up real-time listeners for the exercises collection in Firestore.
+         * Updates the local `exercises` array and re-renders the view on data changes.
+         */
+        function setupFirestoreListeners() {
+            if (!db || !authReady) return; // Ensure Firestore and auth are ready
+            // Define the collection reference for public exercises
+            const exercisesCollectionRef = collection(db, `artifacts/${appId}/public/data/exercises`);
+            // Listen for real-time updates to the collection
+            onSnapshot(exercisesCollectionRef, (snapshot) => {
+                // Map document data to local exercise objects, including the document ID
+                exercises = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                renderView(); // Re-render the view to reflect updated data
+            }, (error) => console.error("Firestore Listener Error:", error)); // Log any errors
+        }
+
+        /**
+         * Saves a new exercise document to Firestore.
+         * @param {object} exerciseData - The data for the exercise to be saved.
+         * @returns {Promise<boolean>} - True if successful, false otherwise.
+         */
+        async function saveExerciseToFirestore(exerciseData) {
+            if (!authReady) return false; // Ensure auth is ready before saving
+            try {
+                // Get the collection reference
+                const exercisesCollectionRef = collection(db, `artifacts/${appId}/public/data/exercises`);
+                await addDoc(exercisesCollectionRef, exerciseData); // Add the new document
+                return true;
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                return false;
+            }
+        }
+
+        /**
+         * Deletes an exercise document from Firestore.
+         * @param {string} exerciseId - The ID of the exercise to be deleted.
+         * @returns {Promise<boolean>} - True if successful, false otherwise.
+         */
+        async function deleteExerciseFromFirestore(exerciseId) {
+            if (!authReady) return false; // Ensure auth is ready before deleting
+            try {
+                // Delete the document by its ID
+                await deleteDoc(doc(db, `artifacts/${appId}/public/data/exercises`, exerciseId));
+                return true;
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+                return false;
+            }
+        }
+
+        // --- Helper & Audio Functions ---
+        /**
+         * Converts a File object to a Base64 encoded string.
+         * @param {File} file - The file to convert.
+         * @returns {Promise<string>} - A Promise that resolves with the Base64 string.
+         */
+        const fileToBase64 = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+        });
+        
+        /**
+         * Displays a temporary message in a specified HTML element.
+         * @param {HTMLElement} element - The HTML element to display the message in.
+         * @param {string} msg - The message content.
+         * @param {string} classes - Tailwind CSS classes for styling the message.
+         */
+        function showMessage(element, msg, classes) {
+            if (!element) return;
+            element.innerHTML = `<div class="${classes} px-4 py-3 rounded mb-4" role="alert">${msg}</div>`;
+            setTimeout(() => { element.innerHTML = '' }, 4000); // Clear message after 4 seconds
+        }
+
+        /**
+         * Plays a segment of audio from a Base64 encoded audio string.
+         * Uses Web Audio API for precise segment playback.
+         * @param {string} audioBase64 - The Base64 encoded audio data.
+         * @param {string} mimeType - The MIME type of the audio (e.g., 'audio/mpeg').
+         * @param {number} start - The start time of the segment in seconds.
+         * @param {number} end - The end time of the segment in seconds.
+         */
+        async function playAudioSegment(audioBase64, mimeType, start, end) {
+            // Initialize AudioContext if not already done
+            if (!audioContext) {
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                } catch (e) {
+                    showCustomMessage('Lỗi', 'Trình duyệt của bạn không hỗ trợ Web Audio API.', 'error');
+                    return;
+                }
+            }
+            // Resume AudioContext if it's suspended (e.g., after user interaction)
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            // Stop any currently playing audio
+            if (currentAudioSource) {
+                currentAudioSource.stop();
+                currentAudioSource.disconnect(); // Disconnect to clean up
+                currentAudioSource = null;
+            }
+
+            try {
+                // Fetch the audio data and decode it
+                const response = await fetch(audioBase64);
+                const arrayBuffer = await response.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+                // Create a new audio source and connect it to the destination
+                currentAudioSource = audioContext.createBufferSource();
+                currentAudioSource.buffer = audioBuffer;
+                currentAudioSource.connect(audioContext.destination);
+                
+                // Calculate duration, ensuring it's positive
+                const duration = end > start ? end - start : audioBuffer.duration - start;
+                // Start playback from the specified start time for the calculated duration
+                currentAudioSource.start(0, start, duration);
+            } catch (e) {
+                console.error('Lỗi khi phát âm thanh:', e);
+                showCustomMessage('Lỗi', 'Không thể phát file âm thanh này. Đảm bảo định dạng file hợp lệ và thời gian chính xác.', 'error');
+            }
+        }
+
+        /**
+         * Displays a custom modal message box (replaces native alert/confirm).
+         * @param {string} title - The title of the message box.
+         * @param {string} message - The content message.
+         * @param {string} type - Type of message ('info', 'success', 'error') for styling.
+         */
+        function showCustomMessage(title, message, type = 'info') {
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50';
+            let bgColor = 'bg-blue-500';
+            let textColor = 'text-white';
+            if (type === 'error') {
+                bgColor = 'bg-red-500';
+            } else if (type === 'success') {
+                bgColor = 'bg-green-500';
+            }
+
+            modal.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
+                    <h3 class="text-xl font-bold text-gray-800 mb-4">${title}</h3>
+                    <p class="text-gray-700 mb-6">${message}</p>
+                    <div class="flex justify-end">
+                        <button class="px-4 py-2 ${bgColor} ${textColor} rounded-md hover:opacity-90 close-custom-modal">Đóng</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            // Add event listener to close the modal
+            modal.querySelector('.close-custom-modal').addEventListener('click', () => {
+                document.body.removeChild(modal);
+            });
+        }
+
+        /**
+         * Displays a confirmation modal for deleting an exercise.
+         * @param {object} exercise - The exercise object to be deleted.
+         */
+        function confirmDelete(exercise) {
+            exerciseToDelete = exercise;
+            document.getElementById('exercise-to-delete-id').textContent = exercise.folder;
+            document.getElementById('delete-confirm-modal').classList.remove('hidden');
+
+            // Event listeners for the modal buttons
+            document.getElementById('cancel-delete-btn').onclick = () => {
+                document.getElementById('delete-confirm-modal').classList.add('hidden');
+                exerciseToDelete = null;
+            };
+            document.getElementById('confirm-delete-btn').onclick = async () => {
+                document.getElementById('delete-confirm-modal').classList.add('hidden');
+                const success = await deleteExerciseFromFirestore(exerciseToDelete.id);
+                if (success) {
+                    showCustomMessage('Thành công', 'Bài tập đã được xóa.', 'success');
+                } else {
+                    showCustomMessage('Lỗi', 'Không thể xóa bài tập.', 'error');
+                }
+                exerciseToDelete = null;
+            };
+        }
+
+        // --- Navigation ---
+        /**
+         * Navigates to a different view of the application.
+         * @param {string} viewName - The name of the view to navigate to ('home', 'teacher', 'student').
+         */
+        function navigate(viewName) {
+            currentView = viewName;
+            renderView(); // Re-render the application view
+        }
+
+        // Add event listeners for navigation buttons in the header
+        document.getElementById('home-nav-btn').addEventListener('click', () => { selectedExercise = null; navigate('home'); });
+        document.getElementById('teacher-nav-btn').addEventListener('click', () => { selectedExercise = null; navigate('teacher'); });
+        document.getElementById('student-nav-btn').addEventListener('click', () => { selectedExercise = null; navigate('student'); });
+
+        // --- View Rendering ---
+        /**
+         * Renders the appropriate view based on the `currentView` state.
+         */
+        function renderView() {
+            const mainContent = document.getElementById('app-main-content');
+            mainContent.innerHTML = ''; // Clear previous content
+
+            if (!authReady) {
+                mainContent.innerHTML = '<div class="text-center text-gray-600 text-xl mt-10">Đang xác thực...</div>';
+                return;
+            }
+
+            // Render different views based on currentView
+            switch (currentView) {
+                case 'home': renderHomeView(mainContent); break;
+                case 'teacher': renderTeacherDashboard(mainContent); break;
+                case 'timestamp_editor': /* Handled by specific logic in renderTeacherDashboard's submit handler */ break;
+                case 'student':
+                    // If an exercise is selected, render the player; otherwise, render the student dashboard
+                    selectedExercise ? renderExercisePlayer(mainContent, selectedExercise) : renderStudentDashboard(mainContent);
+                    break;
+                default: renderHomeView(mainContent); // Default to home view
+            }
+        }
+
+        /**
+         * Renders the home view, allowing users to select their role.
+         * @param {HTMLElement} parentDiv - The parent HTML element to render into.
+         */
+        function renderHomeView(parentDiv) {
+            parentDiv.innerHTML = `
+                <div class="bg-white p-8 rounded-xl shadow-lg text-center">
+                    <h2 class="text-3xl font-bold text-gray-800 mb-6">Chào mừng bạn!</h2>
+                    <p class="text-lg text-gray-600 mb-8">Chọn vai trò của bạn để bắt đầu.</p>
+                    <div class="flex flex-col md:flex-row justify-center space-y-4 md:space-y-0 md:space-x-6">
+                        <button id="home-teacher-btn" class="px-8 py-4 bg-green-500 text-white text-xl font-semibold rounded-lg shadow-xl hover:bg-green-600">Tôi là Giáo Viên</button>
+                        <button id="home-student-btn" class="px-8 py-4 bg-purple-500 text-white text-xl font-semibold rounded-lg shadow-xl hover:bg-purple-600">Tôi là Học Sinh</button>
+                    </div>
+                </div>`;
+            // Add event listeners for role selection buttons
+            document.getElementById('home-teacher-btn').addEventListener('click', () => navigate('teacher'));
+            document.getElementById('home-student-btn').addEventListener('click', () => navigate('student'));
+        }
+
+        /**
+         * Renders the teacher dashboard, including the form to add new exercises and a list of existing ones.
+         * @param {HTMLElement} parentDiv - The parent HTML element to render into.
+         */
+        function renderTeacherDashboard(parentDiv) {
+            parentDiv.innerHTML = `
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-3xl font-bold text-gray-800 mb-6">Quản lý Bài Giảng</h2>
+                    <div id="teacher-message-area"></div>
+                    <form id="add-exercise-form" class="mb-8 p-6 border rounded-lg bg-gray-50">
+                        <h3 class="text-2xl font-semibold text-gray-700 mb-4">Bước 1: Tải Lên Bài Nghe</h3>
+                        <div class="mb-4">
+                            <label for="folder-input" class="block text-gray-700 text-sm font-bold mb-2">Thư mục/Chủ đề:</label>
+                            <input type="text" id="folder-input" class="shadow border rounded-lg w-full py-3 px-4" required />
+                        </div>
+                        <div class="mb-4">
+                            <label for="audio-file-input" class="block text-gray-700 text-sm font-bold mb-2">File Ghi Âm:</label>
+                            <input type="file" id="audio-file-input" accept="audio/*" class="block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-blue-50 file:text-blue-700" required />
+                        </div>
+                        <div class="mb-6">
+                            <label for="answer-key-input" class="block text-gray-700 text-sm font-bold mb-2">Đáp án (toàn bộ nội dung):</label>
+                            <textarea id="answer-key-input" class="shadow border rounded-lg w-full py-3 px-4 h-32" required></textarea>
+                        </div>
+                        <button type="submit" class="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg">Tiếp tục &rarr;</button>
+                    </form>
+                    <h3 class="text-2xl font-semibold text-gray-700 mb-4">Các Bài Tập Đã Tải Lên</h3>
+                    <div id="exercises-list-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+                </div>`;
+
+            // Add event listener for the form submission
+            document.getElementById('add-exercise-form').addEventListener('submit', async (e) => {
+                e.preventDefault(); // Prevent default form submission
+                const folder = e.target.elements['folder-input'].value.trim();
+                const audioFile = e.target.elements['audio-file-input'].files[0];
+                const answerKey = e.target.elements['answer-key-input'].value.trim();
+                const formBtn = e.target.querySelector('button[type="submit"]');
+
+                if (!folder || !audioFile || !answerKey) {
+                    showMessage(document.getElementById('teacher-message-area'), 'Vui lòng điền đủ thông tin.', 'bg-red-100 border-red-400 text-red-700');
+                    return;
+                }
+                
+                formBtn.disabled = true; // Disable button during processing
+                formBtn.innerHTML = '<div class="spinner border-white mr-2"></div> Đang xử lý...'; // Add spinner
+
+                try {
+                    const audioBase64 = await fileToBase64(audioFile); // Convert audio file to Base64
+                    
+                    // Split the answer key into sentences and initialize timestamps to 0.0
+                    // This is where the manual splitting starts, with initial 0.0 timestamps
+                    const sentences = (answerKey.match(/[^.!?]+[.!?]+/g) || [answerKey]).map(s => s.trim()).filter(Boolean);
+                    const sentencesWithTimestamps = sentences.map(s => ({ text: s, start: 0, end: 0 }));
+
+                    const exerciseData = {
+                        folder,
+                        audioBase64,
+                        audioMimeType: audioFile.type,
+                        sentences: sentencesWithTimestamps // Use manually initialized sentences
+                    };
+                    // Render the timestamp editor with the prepared exercise data
+                    renderTimestampEditor(document.getElementById('app-main-content'), exerciseData);
+                    showMessage(document.getElementById('teacher-message-area'), 'Vui lòng nhập thời gian bắt đầu và kết thúc cho mỗi câu.', 'bg-green-100 border-green-400 text-green-700');
+                } catch (error) {
+                    showMessage(document.getElementById('teacher-message-area'), 'Lỗi xử lý file: ' + error.message, 'bg-red-100 border-red-400 text-red-700');
+                    console.error("Processing error:", error);
+                } finally {
+                    formBtn.disabled = false; // Re-enable button
+                    formBtn.innerHTML = 'Tiếp tục &rarr;'; // Reset button text
+                }
+            });
+
+            // Render the list of existing exercises for the teacher
+            renderTeacherExercisesList(document.getElementById('exercises-list-container'));
+        }
+        
+        /**
+         * Renders the timestamp editor view, allowing teachers to adjust sentence timestamps.
+         * @param {HTMLElement} parentDiv - The parent HTML element to render into.
+         * @param {object} exerciseData - The exercise data including sentences with initial timestamps.
+         */
+        function renderTimestampEditor(parentDiv, exerciseData) {
+            currentView = 'timestamp_editor'; // Update current view state
+            parentDiv.innerHTML = `
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-3xl font-bold text-gray-800 mb-6">Bước 2: Căn Chỉnh Thời Gian</h2>
+                    <p class="mb-6 text-gray-600">Nghe file audio và nhập thời gian bắt đầu (start) và kết thúc (end) cho mỗi câu (tính bằng giây, ví dụ: 1.25).</p>
+                    <div class="mb-6 p-4 border rounded-lg bg-blue-50">
+                        <audio controls class="w-full" src="${exerciseData.audioBase64}"></audio>
+                    </div>
+                    <div id="sentence-list" class="space-y-4"></div>
+                    <div class="mt-8 flex justify-between">
+                        <button id="back-to-teacher-dash" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg">Quay Lại</button>
+                        <button id="save-exercise-btn" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg">Lưu Bài Tập</button>
+                    </div>
+                </div>`;
+
+            const sentenceListDiv = document.getElementById('sentence-list');
+            // Populate the list with sentences and their timestamp input fields
+            exerciseData.sentences.forEach((sentence, index) => {
+                const sentenceDiv = document.createElement('div');
+                sentenceDiv.className = 'p-4 border rounded-lg bg-gray-50';
+                sentenceDiv.innerHTML = `
+                    <p class="font-semibold text-gray-800 mb-2">Câu ${index + 1}: ${sentence.text}</p>
+                    <div class="flex items-center space-x-4">
+                        <label class="w-20">Start (s):</label>
+                        <input type="number" step="0.01" class="timestamp-start shadow border rounded w-full py-2 px-3" data-index="${index}" value="${sentence.start.toFixed(2)}">
+                        <label class="w-20">End (s):</label>
+                        <input type="number" step="0.01" class="timestamp-end shadow border rounded w-full py-2 px-3" data-index="${index}" value="${sentence.end.toFixed(2)}">
+                        <button class="play-sentence-segment-btn bg-blue-400 hover:bg-blue-500 text-white p-2 rounded-full shadow-md" data-index="${index}" title="Nghe đoạn này">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        </button>
+                    </div>`;
+                sentenceListDiv.appendChild(sentenceDiv);
+            });
+
+            // Add event listeners for navigation and saving
+            document.getElementById('back-to-teacher-dash').addEventListener('click', () => navigate('teacher'));
+            document.getElementById('save-exercise-btn').addEventListener('click', async () => {
+                const starts = document.querySelectorAll('.timestamp-start');
+                const ends = document.querySelectorAll('.timestamp-end');
+                let isValid = true;
+                // Map the sentences to their final timestamp values
+                const finalSentences = exerciseData.sentences.map((s, i) => {
+                    const start = parseFloat(starts[i].value);
+                    const end = parseFloat(ends[i].value);
+                    // Validate timestamps
+                    if (isNaN(start) || isNaN(end) || start < 0 || end <= start) {
+                        isValid = false;
+                    }
+                    return { ...s, start, end };
+                });
+
+                if (!isValid) {
+                    showCustomMessage('Lỗi', 'Thời gian không hợp lệ. Vui lòng kiểm tra lại. "End" phải lớn hơn "Start" và không âm.', 'error');
+                    return;
+                }
+                
+                const finalExerciseData = { ...exerciseData, sentences: finalSentences };
+                // Save the exercise to Firestore
+                const success = await saveExerciseToFirestore(finalExerciseData);
+                if (success) {
+                    showCustomMessage('Thành công', 'Lưu bài tập thành công!', 'success');
+                    navigate('teacher'); // Go back to teacher dashboard
+                } else {
+                    showCustomMessage('Lỗi', 'Lỗi khi lưu bài tập.', 'error');
+                }
+            });
+
+            // Add event listeners for playing individual sentence segments
+            document.querySelectorAll('.play-sentence-segment-btn').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const index = parseInt(e.currentTarget.dataset.index);
+                    const sentence = exerciseData.sentences[index];
+                    const startInput = document.querySelector(`.timestamp-start[data-index="${index}"]`);
+                    const endInput = document.querySelector(`.timestamp-end[data-index="${index}"]`);
+                    const start = parseFloat(startInput.value);
+                    const end = parseFloat(endInput.value);
+
+                    if (isNaN(start) || isNaN(end)) {
+                        showCustomMessage('Lỗi', 'Vui lòng nhập thời gian hợp lệ trước khi nghe.', 'error');
+                        return;
+                    }
+                    playAudioSegment(exerciseData.audioBase64, exerciseData.audioMimeType, start, end);
+                });
+            });
+        }
+
+        /**
+         * Renders the list of exercises for the teacher dashboard.
+         * @param {HTMLElement} container - The HTML element to render the list into.
+         */
+        function renderTeacherExercisesList(container) {
+            container.innerHTML = ''; // Clear existing list
+            if (exercises.length === 0) {
+                container.innerHTML = '<p class="text-gray-600 col-span-full">Chưa có bài tập nào.</p>';
+                return;
+            }
+            // Create a card for each exercise
+            exercises.forEach(ex => {
+                const exDiv = document.createElement('div');
+                exDiv.className = 'bg-blue-50 p-4 rounded-lg shadow-md';
+                exDiv.innerHTML = `<h4 class="text-lg font-semibold text-blue-800">${ex.folder}</h4>
+                                     <p class="text-sm text-gray-700">${ex.sentences?.length || 0} câu</p>
+                                     <button data-exercise-id="${ex.id}" class="delete-exercise-btn mt-2 px-3 py-1 bg-red-500 text-white text-sm rounded-md hover:bg-red-600">Xóa</button>`;
+                container.appendChild(exDiv);
+            });
+            // Add event listeners to delete buttons
+            container.querySelectorAll('.delete-exercise-btn').forEach(b => b.addEventListener('click', (e) => confirmDelete(exercises.find(ex => ex.id === e.target.dataset.exerciseId))));
+        }
+
+        /**
+         * Renders the student dashboard, displaying available exercises.
+         * @param {HTMLElement} parentDiv - The parent HTML element to render into.
+         */
+        function renderStudentDashboard(parentDiv) {
+            parentDiv.innerHTML = `<div class="bg-white p-8 rounded-xl shadow-lg">
+                <h2 class="text-3xl font-bold text-gray-800 mb-6">Chọn Bài Tập</h2>
+                <div id="student-exercises-list-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div></div>`;
+            const container = document.getElementById('student-exercises-list-container');
+            if (exercises.length === 0) {
+                container.innerHTML = '<p class="text-gray-600 col-span-full">Chưa có bài tập nào.</p>';
+                return;
+            }
+            // Create interactive cards for each exercise
+            exercises.forEach(ex => {
+                const exDiv = document.createElement('div');
+                exDiv.className = 'bg-purple-50 p-4 rounded-lg shadow-md hover:bg-purple-100 transition cursor-pointer';
+                exDiv.dataset.exerciseId = ex.id;
+                exDiv.innerHTML = `<h3 class="text-lg font-semibold text-purple-800">${ex.folder}</h3>
+                                     <p class="text-sm text-gray-700">${ex.sentences?.length || 0} câu</p>`;
+                exDiv.addEventListener('click', () => {
+                    selectedExercise = ex; // Set the selected exercise
+                    currentSentenceIndex = 0; // Reset sentence index
+                    renderView(); // Render the exercise player
+                });
+                container.appendChild(exDiv);
+            });
+        }
+
+        /**
+         * Renders the exercise player for students, allowing them to listen and type.
+         * @param {HTMLElement} parentDiv - The parent HTML element to render into.
+         * @param {object} exercise - The selected exercise object.
+         */
+        function renderExercisePlayer(parentDiv, exercise) {
+            const sentences = exercise.sentences || [];
+            const totalSentences = sentences.length;
+            const currentSentence = sentences[currentSentenceIndex] || { text: "Không có câu nào.", start: 0, end: 0 };
+            
+            // Initialize student answers for this exercise if not already present
+            if (!studentAnswers[exercise.id]) studentAnswers[exercise.id] = {};
+            const savedAnswer = studentAnswers[exercise.id][currentSentenceIndex] || ''; // Get previously saved answer
+
+            parentDiv.innerHTML = `
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <button id="back-to-student-dashboard" class="mb-6 px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">&larr; Quay lại</button>
+                    <h2 class="text-3xl font-bold text-gray-800 mb-2">${exercise.folder}</h2>
+                    <p class="text-xl font-semibold text-purple-700 mb-6">Câu ${currentSentenceIndex + 1} / ${totalSentences}</p>
+                    
+                    <div class="mb-6 p-4 border rounded-lg bg-blue-50 flex items-center space-x-4">
+                        <button id="play-sentence-btn" class="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-full shadow-md">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        </button>
+                        <p class="text-gray-700">Nghe câu và điền vào ô dưới đây.</p>
+                    </div>
+
+                    <div class="mb-6">
+                        <textarea id="student-input" class="shadow border rounded-lg w-full py-3 px-4 h-24" placeholder="Gõ bài làm của bạn...">${savedAnswer}</textarea>
+                    </div>
+
+                    <div class="flex items-center justify-between">
+                        <button id="prev-sentence-btn" class="bg-gray-500 text-white font-bold py-3 px-6 rounded-lg hover:bg-gray-600">&larr; Câu trước</button>
+                        <button id="grade-submission-btn" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-3 px-6 rounded-lg shadow-md">Chấm Điểm</button>
+                        <button id="next-sentence-btn" class="bg-gray-500 text-white font-bold py-3 px-6 rounded-lg hover:bg-gray-600">Câu sau &rarr;</button>
+                    </div>
+                    <div id="graded-result-area" class="mt-8 p-6 border rounded-lg bg-green-50 hidden"></div>
+                </div>`;
+            
+            const studentInput = document.getElementById('student-input');
+            // Save student's input as they type
+            studentInput.addEventListener('input', () => studentAnswers[exercise.id][currentSentenceIndex] = studentInput.value);
+
+            // Event listener for playing the current sentence audio segment
+            document.getElementById('play-sentence-btn').addEventListener('click', () => playAudioSegment(exercise.audioBase64, exercise.audioMimeType, currentSentence.start, currentSentence.end));
+            // Event listener to go back to student dashboard
+            document.getElementById('back-to-student-dashboard').addEventListener('click', () => { selectedExercise = null; renderView(); });
+            // Event listener for grading the current sentence
+            document.getElementById('grade-submission-btn').addEventListener('click', () => gradeCurrentSentence(currentSentence.text));
+            
+            const prevBtn = document.getElementById('prev-sentence-btn');
+            const nextBtn = document.getElementById('next-sentence-btn');
+            // Disable navigation buttons if at the start or end of sentences
+            prevBtn.disabled = currentSentenceIndex === 0;
+            nextBtn.disabled = currentSentenceIndex >= totalSentences - 1;
+            // Event listeners for previous/next sentence navigation
+            prevBtn.addEventListener('click', () => { if (currentSentenceIndex > 0) { currentSentenceIndex--; renderView(); } });
+            nextBtn.addEventListener('click', () => { if (currentSentenceIndex < totalSentences - 1) { currentSentenceIndex++; renderView(); } });
+        }
+        
+        /**
+         * Grades the student's submission for the current sentence against the correct answer.
+         * Displays a comparison of the student's answer and the correct answer, highlighting differences.
+         * @param {string} correctSentence - The correct answer for the current sentence.
+         */
+        function gradeCurrentSentence(correctSentence) {
+            const studentInput = document.getElementById('student-input').value;
+            const gradedResultArea = document.getElementById('graded-result-area');
+            gradedResultArea.innerHTML = ''; // Clear previous grading results
+            gradedResultArea.classList.remove('hidden'); // Show the grading area
+
+            // Simple word-by-word comparison (case-insensitive, punctuation-stripped)
+            const normalize = (text) => text.toLowerCase().replace(/[.,!?;:]/g, '').trim();
+            const studentWords = normalize(studentInput).split(/\s+/).filter(Boolean);
+            const answerWords = normalize(correctSentence).split(/\s+/).filter(Boolean);
+
+            let correctWordsCount = 0;
+            let comparisonHtml = '<p class="text-lg font-bold text-gray-800 mb-4">Kết quả chấm điểm:</p>';
+            comparisonHtml += '<div class="mb-4 p-3 border rounded-lg bg-white shadow-sm">';
+            comparisonHtml += '<p class="font-semibold text-gray-700 mb-2">Đáp án của bạn:</p>';
+            
+            // Display student's answer with highlights
+            const studentDisplayWords = studentInput.trim().split(/\s+/).filter(Boolean);
+            const answerDisplayWords = correctSentence.trim().split(/\s+/).filter(Boolean);
+
+            let tempStudentWords = [...studentWords];
+            let tempAnswerWords = [...answerWords];
+
+            let studentFormatted = [];
+            let answerFormatted = [];
+
+            // Simple comparison to highlight correct/incorrect words
+            for (let i = 0; i < Math.max(studentDisplayWords.length, answerDisplayWords.length); i++) {
+                const sWord = studentDisplayWords[i] ? normalize(studentDisplayWords[i]) : '';
+                const aWord = answerDisplayWords[i] ? normalize(answerDisplayWords[i]) : '';
+
+                if (sWord === aWord && sWord !== '') {
+                    studentFormatted.push(`<span class="text-green-700 font-bold">${studentDisplayWords[i]}</span>`);
+                    answerFormatted.push(`<span class="text-green-700 font-bold">${answerDisplayWords[i]}</span>`);
+                    correctWordsCount++;
+                } else {
+                    if (studentDisplayWords[i]) {
+                        studentFormatted.push(`<span class="text-red-700 font-bold">${studentDisplayWords[i]}</span>`);
+                    }
+                    if (answerDisplayWords[i]) {
+                        answerFormatted.push(`<span class="text-blue-700 font-bold">${answerDisplayWords[i]}</span>`);
+                    }
+                }
+            }
+
+            comparisonHtml += `<p>${studentFormatted.join(' ')}</p>`;
+            comparisonHtml += '</div>';
+
+            comparisonHtml += '<div class="p-3 border rounded-lg bg-white shadow-sm">';
+            comparisonHtml += '<p class="font-semibold text-gray-700 mb-2">Đáp án đúng:</p>';
+            comparisonHtml += `<p>${answerFormatted.join(' ')}</p>`;
+            comparisonHtml += '</div>';
+
+            const accuracy = answerWords.length > 0 ? (correctWordsCount / answerWords.length) * 100 : 0;
+            comparisonHtml += `<p class="mt-4 text-lg font-bold">Độ chính xác: <span class="${accuracy >= 70 ? 'text-green-600' : accuracy >= 40 ? 'text-yellow-600' : 'text-red-600'}">${accuracy.toFixed(2)}%</span></p>`;
+
+            gradedResultArea.innerHTML = comparisonHtml;
+        }
+    </script>
+</body>
+</html>
